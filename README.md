@@ -1,5 +1,5 @@
 # Semi-Supervised Bayesian GANs with Log-Signatures for Uncertainty-Aware Credit Card Fraud Detection
-This is the github repository for the corresponding article available on 
+This is the github repository for the corresponding article.
 
 # Overview
 We present a novel deep generative semi-supervised framework for credit card fraud detection, formulated as time series classification task.
