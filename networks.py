@@ -117,3 +117,30 @@ class ResFNNGenerator(GeneratorBase):
         
         x = self.seq_nn(z)
         return x
+
+
+class GRUClassifier(nn.Module):
+    def __init__(self, input_dim=4, hidden_dim=64, output_dim=2, num_layers=2, dropout=0.0, bidirectional=False):
+        super(GRUClassifier, self).__init__()
+        # dim: batch x len x feature
+        self.gru = nn.GRU(
+            input_size=input_dim,      # here: 4 features
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=True,
+            dropout=dropout if num_layers > 1 else 0.0,
+            bidirectional=bidirectional
+        )
+        
+        fc_input_dim = hidden_dim * (2 if bidirectional else 1)
+        self.fc = nn.Linear(fc_input_dim, output_dim)
+
+    def forward(self, x):
+        # x: [batch, seq_len=5, features=4]
+        out, h_n = self.gru(x)  
+        # h_n: [num_layers * num_directions, batch, hidden_dim]
+
+        # take last hidden state
+        last_hidden = h_n[-1]  # [batch, hidden_dim * num_directions]
+        logits = self.fc(last_hidden)  # [batch, output_dim]
+        return logits

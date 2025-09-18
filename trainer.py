@@ -738,3 +738,81 @@ class SBGANTrainer(BaseTrainer):
         grad = compute_grad2(d_out, x_interp)
         reg = (grad.sqrt() - center).pow(2).mean()
         return reg
+
+
+
+def train_gru(model, X_train, y_train, epochs=10, batch_size=64, lr=1e-3, device="cpu"):
+    model.to(device)
+    optimizer = torch.optim.Adam(model.parameters(), lr=lr)
+    criterion = nn.CrossEntropyLoss()
+
+    n = X_train.shape[0]
+    for ep in range(1, epochs+1):
+        # shuffle
+        perm = torch.randperm(n)
+        for start in range(0, n, batch_size):
+            idx = perm[start:start+batch_size]
+            xb, yb = X_train[idx].to(device), y_train[idx].to(device)
+
+            logits = model(xb)
+            loss = criterion(logits, yb)
+
+            optimizer.zero_grad()
+            loss.backward()
+            optimizer.step()
+            
+def update_teacher(student_net, teacher_net, alpha):
+    """ teacher = alpha*teacher + (1-alpha)*student """
+    for teacher_param, student_param in zip(teacher_net.parameters(), student_net.parameters()):
+        teacher_param.data.mul_(alpha).add_(student_param.data, alpha=(1 - alpha))
+
+def train_mean_teacher(student, teacher, X_lab, emb_lab, y_lab, X_unlab, emb_unlab, 
+                       optimizer, batch_size=32, steps_per_epoch=100):
+    student.train()
+    teacher.eval()  # Teacher often kept in eval mode (no dropout, BN updates, etc.)
+
+    n_lab   = len(X_lab)
+    n_unlab = len(X_unlab)
+    
+    noise_std=0.05  
+    consistency_weight=0.5  
+    for step in range(steps_per_epoch):
+        # 1) Sample a random batch from labeled data
+        idx_lab = np.random.choice(n_lab, batch_size, replace=True)
+        data_l, data_l_emb  = X_lab[idx_lab], emb_lab[idx_lab]
+        labels_l = y_lab[idx_lab]
+
+        # 2) Sample a random batch from unlabeled data
+        idx_unlab = np.random.choice(n_unlab, batch_size, replace=True)
+        data_u, data_u_emb = X_unlab[idx_unlab], emb_unlab[idx_unlab]
+
+        # 3) Add Gaussian noise for perturbations
+        data_l_noisy = data_l + noise_std * torch.randn_like(data_l)
+        data_u_student = data_u + noise_std * torch.randn_like(data_u)
+        data_u_teacher = data_u  # teacher sees clean input
+
+        # 4) Compute student predictions
+        logits_l = student(data_l_noisy, data_l_emb)
+        logits_u_student = student(data_u_student, data_u_emb)
+
+        # 5) Compute teacher predictions (fixed at this step)
+        with torch.no_grad():
+            logits_u_teacher = teacher(data_u_teacher, data_u_emb)
+
+        # 6) Convert to probabilities
+        probs_u_student = F.log_softmax(logits_u_student, dim=1)
+        probs_u_teacher = F.softmax(logits_u_teacher, dim=1)
+
+        # 7) Compute losses
+        loss_sup = criterion_sup(logits_l, labels_l)
+        loss_cons = F.kl_div(probs_u_student, probs_u_teacher, reduction="batchmean")
+
+        loss = loss_sup + consistency_weight * loss_cons
+
+        # 8) Update student
+        optimizer.zero_grad()
+        loss.backward()
+        optimizer.step()
+
+        # 9) Update teacher using EMA
+        update_teacher(student, teacher, alpha=ema_decay)

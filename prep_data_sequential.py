@@ -59,16 +59,20 @@ data['risk_level_num'] = data['risk_level'].map(string_to_number)
 # prepare transaction data 
 import copy
 
-d = data.drop(columns=["age", "gender", "zipcodeOri", "merchant", "zipMerchant", "category", "risk_level", "merchant_risk_level"]).copy()
+d = data.drop(columns=[ "zipcodeOri", "merchant", "zipMerchant", "category", "risk_level"]).copy()
+d["age"] = pd.factorize(d["age"])[0]
+d["gender"] = pd.factorize(d["gender"])[0]
+d["customer_encoded"] = d["customer"].astype("category").cat.codes
+
 grouped = d.groupby("customer")
 group_tensors = [
-    torch.tensor(group.iloc[ : (start_ind+i),:].drop(columns=['customer']).values, dtype=torch.float32) 
+    torch.tensor(group.iloc[max(0, (start_ind+i)-4)  : (start_ind+i),:].drop(columns=['customer']).values, dtype=torch.float32)  #max(0, (start_ind+i)-4) für lstm
     for _, group in grouped
     for i in range(group.shape[0]-start_ind+1)    
 ]
 
-x = [g[:,:2] for g in group_tensors]
-labels = [g[-1,2].sum()>0 for g in group_tensors] 
+x = [g[:,[0,3,1,2]] for g in group_tensors]
+labels = [g[-1,4].sum()>0 for g in group_tensors]
 """customers = torch.stack([g[0,-1] for g in group_tensors])
 
 train_idx, test_idx = stratified_group_train_test_split_torch(torch.stack(labels), customers, test_size=0.1)
@@ -76,8 +80,9 @@ x_train, x_test = [x[i] for i in train_idx], [x[i] for i in test_idx]
 labels_train, labels_test = [labels[i] for i in train_idx], [labels[i] for i in test_idx]"""
 
 labels_orig = copy.deepcopy(labels)
-torch.save(x, "/data/x_transactions.pt")
-torch.save(labels_orig, "/data/labels_transactions.pt")
+x_norm = normalize_data(x)
+torch.save(x_norm, "/data/x_transactions_gru.pt")
+torch.save(labels_orig, "/data/labels_transactions/labels_transactions_gru.pt")
 
 d2 = data.copy()
 d2["age"] = pd.factorize(d2["age"])[0]
@@ -104,14 +109,3 @@ for _,g in g2:
 first_fraud = [g[:-1,2].sum()==0 for g in group_tensors]
 
 torch.save(emb_list, "/data/emb_transactions.pt")
-
-import random
-
-aug = [Scale(scale=2, dim=0),
-    AddTime(),
-    LeadLag(),
-    VisiTrans()]
-
-x_norm = normalize_data(x)
-x_logsig = sig_list(x_norm, aug)
-torch.save(x_logsig, "/data/x_logsig.pt")

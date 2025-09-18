@@ -77,9 +77,11 @@ def train_test_list(labels, rate, random_state=123):
 
     return train_ind, test_ind
 
-def normalize_data(list_in):
-        m0 = max([l[:, 0].diff().max() for l in list_in])
-        m1 = max([l[:, 1].max() for l in list_in])
+def normalize_data(list_in, m0=None, m1=None):
+        if m0 == None:
+            m0 = max([l[:, 0].diff().max() for l in list_in])
+        if m1 == None:
+            m1 = max([l[:, 1].max() for l in list_in])
         x_norm = []
         for t in list_in:
             updated_tensor = t.clone()
@@ -87,6 +89,7 @@ def normalize_data(list_in):
             updated_tensor[1:, 1] = (updated_tensor[:, 1]/m1)[1:]
             x_norm.append(updated_tensor[1:,:])
         return x_norm
+
 
 from functools import reduce
 def sig_list(x, augmentations, depth=3, log=True):
@@ -262,20 +265,20 @@ def expected_cost_curve(y_true, y_score, amounts, fp_pct=0.02):
     best_row = df.loc[df["Total_cost"].idxmin()]
     return df, best_row
 
-def expected_cost_at_k(y_true, y_score, amounts, k_percent, fp_pct=0.02):
+def expected_cost_at_k(y_true, y_score, amounts, k_percent, fp_pct=0.02, fn_pct=1.0):
     n = len(y_true)
     k = max(1, int(np.ceil(n * (k_percent / 100.0))))
     order = np.argsort(-y_score)
     top = order[:k]
     rest = order[k:]
     fp_cost = (fp_pct * amounts[(y_true==0) & np.isin(np.arange(n), top)]).sum()
-    fn_cost = amounts[(y_true==1) & np.isin(np.arange(n), rest)].sum()
+    fn_cost = fn_pct * amounts[(y_true==1) & np.isin(np.arange(n), rest)].sum()
     return fp_cost + fn_cost
 
-def expected_cost_table(y_true, y_score, amounts, k_percent=(0.1, 0.2, 0.5, 1.0), fp_pct=0.02):
+def expected_cost_table(y_true, y_score, amounts, k_percent=(0.1, 0.2, 0.5, 1.0), fp_pct=0.02, fn_pct=1.0):
     cs = {}
     for k in k_percent:
-        c = expected_cost_at_k(y_true, y_score, amounts, k, fp_pct)
+        c = expected_cost_at_k(y_true, y_score, amounts, k, fp_pct, fn_pct)
         cs[k] = c
         
     return pd.DataFrame([cs])
@@ -645,3 +648,79 @@ def parse_augmentations(list_of_dicts):
         )
     return augmentations
 
+
+import torch
+
+@torch.no_grad()
+def stratified_group_train_test_split_torch(
+    y: torch.Tensor,                # shape [N], 0/1 (binary); can extend to multi-class
+    groups: torch.Tensor,           # shape [N], group ids (e.g., customer ids)
+    test_size: float = 0.2,
+    generator: torch.Generator = None,  # for tie-breaking randomness
+):
+    """
+    Greedy splitter: stratifies by labels while enforcing group exclusivity.
+    Works entirely in torch (no numpy).
+
+    Returns
+    -------
+    train_idx : LongTensor
+    test_idx  : LongTensor
+    """
+    assert y.dim() == 1 and groups.dim() == 1 and y.numel() == groups.numel()
+    assert 0.0 < test_size < 1.0, "test_size must be in (0,1)."
+
+    if generator is None:
+        generator = torch.Generator()
+        generator.manual_seed(42)
+
+    # Ensure 1D long tensors
+    y = y.view(-1).long()
+    groups = groups.view(-1)
+
+    # Unique groups and inverse index per sample
+    uniq_groups, inv = torch.unique(groups, return_inverse=True)
+    G = uniq_groups.numel()
+
+    # Count per-group sizes and positives
+    n_per_group = torch.bincount(inv, minlength=G)                      # total samples per group
+    pos_per_group = torch.bincount(inv, weights=y.float(), minlength=G) # positives per group (float)
+    pos_per_group = pos_per_group.round().long()
+
+    total_n = int(n_per_group.sum().item())
+    total_pos = int(pos_per_group.sum().item())
+
+    target_n_test = int(round(test_size * total_n))
+    target_pos_test = int(round(test_size * total_pos))
+
+    # Order groups by "heaviness" (max of pos vs neg in that group), descending
+    neg_per_group = n_per_group - pos_per_group
+    heaviness = torch.maximum(pos_per_group, neg_per_group)
+    order = torch.argsort(-heaviness)
+
+    # Greedy assignment to test
+    test_n = 0
+    test_pos = 0
+    is_test_group = torch.zeros(G, dtype=torch.bool)
+
+    # Helper: random tie-break in torch
+    def coin_flip():
+        return torch.rand((), generator=generator).item() < 0.5
+
+    for g in order.tolist():
+        cand_test_n = test_n + int(n_per_group[g].item())
+        cand_test_pos = test_pos + int(pos_per_group[g].item())
+
+        err_if_test = (cand_test_n - target_n_test) ** 2 + (cand_test_pos - target_pos_test) ** 2
+        err_if_train = (test_n - target_n_test) ** 2 + (test_pos - target_pos_test) ** 2
+
+        if (err_if_test < err_if_train) or (err_if_test == err_if_train and coin_flip()):
+            is_test_group[g] = True
+            test_n, test_pos = cand_test_n, cand_test_pos
+
+    # Map groups back to samples
+    is_test_sample = is_test_group[inv]
+    test_idx = torch.nonzero(is_test_sample, as_tuple=True)[0]
+    train_idx = torch.nonzero(~is_test_sample, as_tuple=True)[0]
+
+    return train_idx.long(), test_idx.long()
